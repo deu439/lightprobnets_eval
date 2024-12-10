@@ -1,7 +1,8 @@
 from __future__ import absolute_import
 from __future__ import print_function
 
-import numpy as  np
+import numpy as np
+import scipy.special as ss
 import torch
 import torch.nn as nn
 
@@ -26,17 +27,106 @@ def elementwise_laplacian(input_flow, target_flow, min_variance, log_variance):
     return const + weighted_epe
 
 
+def sp_plot(error, entropy, n=25, alpha=100.0, eps=1e-1):
+    def sp_mask(thr, entropy):
+        mask = ss.expit(alpha * (thr[:, None, None] - entropy[None, :, :]))
+        frac = np.mean(1.0 - mask, axis=(1, 2))
+        return mask, frac
+
+    # Find the primary interval for soft thresholding
+    greatest = np.max(entropy) + eps    # Avoid zero-sized interval
+    least = np.min(entropy) - eps
+    _, frac = sp_mask(np.array([least]), entropy)
+    while abs(frac.item() - 1.0) > eps:
+        least -= 1e-3*(greatest - least)
+        _, frac = sp_mask(np.array([least]), entropy)
+
+    _, frac = sp_mask(np.array([greatest]), entropy)
+    while abs(frac.item() - 0.0) > eps:
+        greatest += 1e-3*(greatest - least)
+        _, frac = sp_mask(np.array([greatest]), entropy)
+
+    # Approximate uniform grid
+    grid_entr = np.linspace(greatest, least, n)
+    grid_frac = np.linspace(0, 1, n)
+    mask, frac = sp_mask(grid_entr, entropy)
+    for i in range(10):
+        #print("res: ", np.max(np.abs(frac - grid_frac)))
+        if np.max(np.abs(frac - grid_frac)) <= eps:
+            break
+        grid_entr = np.interp(grid_frac, frac, grid_entr)
+        mask, frac = sp_mask(grid_entr, entropy)
+
+    # Check whether the grid is approximately uniform
+    if np.max(np.abs(frac - grid_frac)) > eps:
+        print("Warning! sp_plot did not converge!")
+        #raise RuntimeError("sp_plot did not converge!")
+
+    # Calculate the sparsification plot
+    splot = np.sum(error[None, :, :] * mask, axis=(1,2)) / np.sum(mask, axis=(1,2))
+
+    # Resample on uniform grid
+    splot = np.interp(grid_frac, frac, splot)
+
+    return splot
+
+
+def evaluate_uncertainty(gt_flows, pred_flows, pred_entropies, sp_samples=25):
+    auc, oracle_auc = 0, 0
+    splots, oracle_splots = [], []
+    batch_size = len(gt_flows)
+    for gt_flow, pred_flow, pred_entropy, i in zip(gt_flows, pred_flows, pred_entropies, range(batch_size)):
+        # Calculate sparsification plots
+        epe_map = np.sqrt(np.sum(np.square(pred_flow[:, :, :2] - gt_flow[:, :, :2]), axis=2))
+        entropy_map = np.sum(pred_entropy[:, :, :2], axis=2)
+        splot = sp_plot(epe_map, entropy_map)
+        oracle_splot = sp_plot(epe_map, epe_map)     # Oracle
+
+        # Collect the sparsification plots and oracle sparsification plots
+        splots += [splot]
+        oracle_splots += [oracle_splot]
+
+        #import matplotlib.pyplot as plt
+        #plt.plot(sfrac, splot, '+-')
+        #plt.show()
+
+        # Cummulate AUC
+        frac = np.linspace(0, 1, sp_samples)
+        auc += np.trapz(splot / splot[0], x=frac)
+        oracle_auc += np.trapz(oracle_splot / oracle_splot[0], x=frac)
+
+    return [auc / batch_size, (auc - oracle_auc) / batch_size], splots, oracle_splots
+
+
+def evaluate_auc(input_flow, target_flow, min_variance, log_variance):
+    if log_variance:
+        predictions_mean, predictions_log_variance = input_flow
+        predictions_variance = torch.exp(predictions_log_variance) + min_variance
+
+    else:
+        predictions_mean, predictions_variance = input_flow
+
+    # Convert to numpy and calculate auc / relative auc
+    gt_flows = target_flow.cpu().numpy().transpose(0, 2, 3, 1)
+    pred_flows = predictions_mean.cpu().numpy().transpose(0, 2, 3, 1)
+    pred_entropies = np.log(predictions_variance.cpu().numpy().transpose(0, 2, 3, 1)) / 2
+    (auc, rel_auc), _, _ = evaluate_uncertainty(gt_flows, pred_flows, pred_entropies)
+
+    return auc, rel_auc
+
+
 class MultiScaleLaplacian(nn.Module):
     def __init__(self,
                  args,
                  num_scales=5,
                  num_highres_scales=2,
                  coarsest_resolution_loss_weight=0.32,
-                 with_llh=False):
+                 with_llh=False, with_auc=False):
 
         super(MultiScaleLaplacian, self).__init__()
         self._args = args
         self._with_llh = with_llh
+        self._with_auc = with_auc
         self._num_scales = num_scales
         self._min_variance = args.model_min_variance
         self._log_variance = args.model_log_variance
@@ -91,5 +181,12 @@ class MultiScaleLaplacian(nn.Module):
             if self._with_llh:
                 llh = - 0.5 * lapl - np.log(8.0 * np.pi)
                 loss_dict["llh"] = llh.mean()
+
+            if self._with_auc:
+                auc, rel_auc = evaluate_auc(output, target,
+                                            min_variance=self._min_variance,
+                                            log_variance=self._log_variance)
+                loss_dict["auc"] = auc
+                loss_dict["rel_auc"] = rel_auc
 
         return loss_dict

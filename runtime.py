@@ -12,6 +12,7 @@ import torch
 import logger
 from holistic_records import EpochRecorder
 from utils.moving_averages import MovingAverage
+from utils.flow import writeFlow
 
 # --------------------------------------------------------------------------------
 # Exponential moving average smoothing factor for speed estimates
@@ -350,6 +351,13 @@ class EvaluationEpoch:
                 # Perform forward evaluation step
                 # ---------------------------------------
                 loss_dict_per_step, output_dict, batch_size = self._step(example_dict)
+
+                # ---------------------------------------
+                # Save flow and log variance estimates
+                # ---------------------------------------
+                if self._args.save_to is not None:
+                    print('Basename:', example_dict['basename'])
+                    print('Data:', output_dict['flow1'][0].shape, output_dict['flow1'][1].shape)
 
                 # ---------------------------------------
                 # recorder

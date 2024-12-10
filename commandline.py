@@ -81,7 +81,7 @@ def _add_arguments_for_module(parser,
     # Determine constructor argument names and defaults
     # -------------------------------------------------------------------------
     try:
-        argspec = inspect.getargspec(class_constructor.__init__)
+        argspec = inspect.getfullargspec(class_constructor.__init__)
         argspec_defaults = argspec.defaults if argspec.defaults is not None else []
         full_args = argspec.args
         default_args_dict = dict(zip(argspec.args[-len(argspec_defaults):], argspec_defaults))
@@ -212,6 +212,7 @@ def _parse_arguments():
     add("--seed", type=int, default=1)
     add("--start_epoch", type=int, default=1)
     add("--total_epochs", type=int, default=10)
+    add("--save_to", type=strings.as_string_or_none, default=None)
 
     # -------------------------------------------------------------------------
     # Arguments inferred from losses

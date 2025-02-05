@@ -19,7 +19,7 @@ def elementwise_laplacian(input_flow, target_flow, min_variance, log_variance):
         predictions_mean, predictions_variance = input_flow
 
     const = torch.sum(torch.log(predictions_variance), dim=1, keepdim=True)
-    squared_difference = (target_flow - predictions_mean) ** 2
+    squared_difference = (target_flow[:, :2] - predictions_mean) ** 2
 
     weighted_epe = torch.sqrt(
         torch.sum(squared_difference / predictions_variance, dim=1, keepdim=True))
@@ -27,35 +27,35 @@ def elementwise_laplacian(input_flow, target_flow, min_variance, log_variance):
     return const + weighted_epe
 
 
-def sp_plot(error, entropy, n=25, alpha=100.0, eps=1e-1):
-    def sp_mask(thr, entropy):
+def sp_plot(error, entropy, gt_mask, n=25, alpha=100.0, eps=1e-1):
+    def sp_mask(thr, entropy, gt_mask):
         mask = ss.expit(alpha * (thr[:, None, None] - entropy[None, :, :]))
-        frac = np.mean(1.0 - mask, axis=(1, 2))
-        return mask, frac
+        frac = np.sum((1.0 - mask)*gt_mask[None], axis=(1, 2)) / np.sum(gt_mask)[None]
+        return mask*gt_mask[None], frac
 
     # Find the primary interval for soft thresholding
     greatest = np.max(entropy) + eps    # Avoid zero-sized interval
     least = np.min(entropy) - eps
-    _, frac = sp_mask(np.array([least]), entropy)
+    _, frac = sp_mask(np.array([least]), entropy, gt_mask)
     while abs(frac.item() - 1.0) > eps:
         least -= 1e-3*(greatest - least)
-        _, frac = sp_mask(np.array([least]), entropy)
+        _, frac = sp_mask(np.array([least]), entropy, gt_mask)
 
-    _, frac = sp_mask(np.array([greatest]), entropy)
+    _, frac = sp_mask(np.array([greatest]), entropy, gt_mask)
     while abs(frac.item() - 0.0) > eps:
         greatest += 1e-3*(greatest - least)
-        _, frac = sp_mask(np.array([greatest]), entropy)
+        _, frac = sp_mask(np.array([greatest]), entropy, gt_mask)
 
     # Approximate uniform grid
     grid_entr = np.linspace(greatest, least, n)
     grid_frac = np.linspace(0, 1, n)
-    mask, frac = sp_mask(grid_entr, entropy)
+    mask, frac = sp_mask(grid_entr, entropy, gt_mask)
     for i in range(10):
         #print("res: ", np.max(np.abs(frac - grid_frac)))
         if np.max(np.abs(frac - grid_frac)) <= eps:
             break
         grid_entr = np.interp(grid_frac, frac, grid_entr)
-        mask, frac = sp_mask(grid_entr, entropy)
+        mask, frac = sp_mask(grid_entr, entropy, gt_mask)
 
     # Check whether the grid is approximately uniform
     if np.max(np.abs(frac - grid_frac)) > eps:
@@ -78,17 +78,17 @@ def evaluate_uncertainty(gt_flows, pred_flows, pred_entropies, sp_samples=25):
     for gt_flow, pred_flow, pred_entropy, i in zip(gt_flows, pred_flows, pred_entropies, range(batch_size)):
         # Calculate sparsification plots
         epe_map = np.sqrt(np.sum(np.square(pred_flow[:, :, :2] - gt_flow[:, :, :2]), axis=2))
+        if gt_flow.shape[2] == 3:    # KITTY dataset includes a mask in the third dimension
+            mask = (gt_flow[:, :, 2] > 0).astype(np.float32)
+        else:
+            mask = torch.ones_like(epe_map)
         entropy_map = np.sum(pred_entropy[:, :, :2], axis=2)
-        splot = sp_plot(epe_map, entropy_map)
-        oracle_splot = sp_plot(epe_map, epe_map)     # Oracle
+        splot = sp_plot(epe_map, entropy_map, mask)
+        oracle_splot = sp_plot(epe_map, epe_map, mask)     # Oracle
 
         # Collect the sparsification plots and oracle sparsification plots
         splots += [splot]
         oracle_splots += [oracle_splot]
-
-        #import matplotlib.pyplot as plt
-        #plt.plot(sfrac, splot, '+-')
-        #plt.show()
 
         # Cummulate AUC
         frac = np.linspace(0, 1, sp_samples)
@@ -175,7 +175,14 @@ class MultiScaleLaplacian(nn.Module):
                                          min_variance=self._min_variance,
                                          log_variance=self._log_variance)
 
-            loss_dict["epe"] = epe.mean()
+            # Calculate average epe
+            if target.size(1) == 3: # Kitti - valid pixel masks
+                mask = target[:, 2]   # (B, H, W) valid mask
+                average_epe = torch.sum(mask * epe) / torch.sum(mask)
+            else:
+                average_epe = torch.mean(epe)
+
+            loss_dict["epe"] = average_epe
             loss_dict["total_loss"] = lapl.mean()
 
             if self._with_llh:

@@ -7,7 +7,7 @@ import torch.nn.functional as tf
 
 
 def elementwise_epe(input_flow, target_flow):
-    residual = target_flow - input_flow
+    residual = target_flow[:, :2] - input_flow
     return torch.norm(residual, p=2, dim=1)
 
 
